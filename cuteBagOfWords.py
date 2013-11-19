@@ -201,67 +201,69 @@ def dummy_all_preprocessing(docs, process_no, file_path):
 
 
 ################################################
-###### VOCABULARY GENERATION METHODS - Parellalization via process creation
+###### - PARALLEL CARDINALITY ESTIMATION - This part cen be coded fully recursive manner!!
 ################################################
 
-def master_vocab_generation(function ,path_chunks=None ,output_path_data=None, processes=5, merge_processes = 5):
+# GIVEN THE PROCESS FUNCTION AND THE MERGE FUNCTIONS PERFORM PARALLEL EXECUTION OF COUNTING 
+# AND MERGING OF COUNTERS  
+def master_parallel_run(process_function, merger_function , path_chunks=None 
+    ,output_path_data=None, no_procs=5, no_merge_procs = 5, tag_file_path=None):
+
     if path_chunks ==  None:
             raise Exception('Path should be defined')
         
+    counter_queue   = Queue() 
+    merge_counter_queue = Queue()
+
+    process_list    = [None]*no_procs
+    merging_processes = [Process(target=merger_function, args=(counter_queue,merge_counter_queue,output_path_data, i, no_merge_procs)) for i in range(no_merge_procs)]
+
     path_list       = get_chunk_paths(path_chunks)
-    num_files       = len(path_list)
-    docs_list       = [None]*processes
-    global_counter  = Counter()
     
-    process_list        = [None]*processes
-    merge_process_list  = [None]*merge_processes
+    if tag_file_path != None:    
+        tag_path_list   = get_chunk_paths(tag_file_path)   
+
+    num_files       = len(path_list)    
     
-    file_counter            = 0
-    counter_queue           = Queue() 
-    merged_counter_queue    = Queue()
-    
-    merge_process_list = [Process(target=dummy_merge_counter, args=(counter_queue, merged_counter_queue, output_path_data, counter, len(merge_process_list)))for counter,process in enumerate(merge_process_list)]
-    
-    for process in merge_process_list:    
+    for process in merging_processes:    
         process.start()    
         
+    file_counter = 0;
     while_flag = True
     while while_flag:
         process_list = []
-        for process_no in range(processes):
+        for process_no in range(no_procs):
             
             if file_counter == num_files:
-                    while_flag = False
-            
+                while_flag = False
+                break       
             next_path = path_list[file_counter]
 #            docs_list[process_no] = list(np.array(pn.read_csv(next_path)['Body']))
 #            docs_list[process_no] = cPickle.load(open(next_path,'r'))
-            process_list.append(Process(target=function, args=(next_path, process_no, counter_queue)))
+            if tag_file_path == None:
+                process_list.append(Process(target=process_function, args= (next_path, process_no, counter_queue)))
+            else:
+                process_list.append(Process(target=process_function, args= (tag_file_path, next_path, process_no, counter_queue)))
+
             file_counter = file_counter+1
+        
+        print('File counter: ' +str(file_counter) )
         
         for process in process_list:
             process.start()
-    
-#        start = time.time()
-#        tmp = Counter()
-#        for process_no in range(processes):
-#            tmp = tmp + counter_queue.get()
-#        global_counter = global_counter + tmp
-#        stop = time.time()
+            
+        for process in process_list:
+            process.join()
+        
         if while_flag == False:
-            for process in merge_process_list:
+            for process in merging_processes:
                 counter_queue.put(-1) # stop signal
-            for process in merge_process_list:
+            for process in merging_processes:
                 process.join()
-#        if while_flag == False:
-#            print("FINISHED!!!")
-#            f = open('Word_Counts.data','wb')
-#            cPickle.dumps(global_counter, f, -1)
-#            return global_counter
-        print 'Number of files '+str(file_counter)
+       
         
         
-def dummy_merge_counter(counter_queue, merge_counter_queue, output_path_data, process_no, merge_processes_num):
+def merge_counters(counter_queue, merge_counter_queue, output_path_data, process_no, no_merge_procs):
     master_counter = Counter()
     while True:
         item = counter_queue.get()
@@ -275,14 +277,15 @@ def dummy_merge_counter(counter_queue, merge_counter_queue, output_path_data, pr
                print('Final MERGING!!!')
                for i in range(merge_counter_queue):
                    master_counter = master_counter + merge_counter_queue.get()
-                   f = open('all_merged_'+ output_path_data,'wb')
-                   cPickle.dumps(master_counter, f, -1)
-                   print("FINISHED!!!")
-           return
+               f = open('all_merged_'+ output_path_data,'wb')
+               cPickle.dumps(master_counter, f)
+               print("FINISHED!!!")
+               return
         master_counter = master_counter + item
         print('Process '+str(process_no)+' Number of items in matrix ' + str(len(master_counter.keys())))
     
-def dummy_token_count(chunk_file, process_no, qu):
+# Count the occurrance of tokens in the given data chunks
+def token_count(chunk_file, process_no, queue):
     # print str(process_no)+' started --- Token counting!!!'
     tf = Counter()
     f = open(chunk_file,'r')
@@ -291,18 +294,29 @@ def dummy_token_count(chunk_file, process_no, qu):
     if docs == None        :
         raise Exception('Doc list should be given !!!')  
     for counter,doc in enumerate(docs):
-#        print str(counter)
         try:
             for token in doc:
                 tf[token] += 1
-#            tf.update(doc)
         except:
             continue
-    qu.put(tf)
-#    print str(process_no)+' finished!!!'
+    queue.put(tf)
     
-    
-    
+# Count the word_tag co-occurrances
+def count_word_tag_matrix(tag_file_path,doc_file_path, process_no, queue):
+    docs = cPickle.load(open(doc_file_path,'r'))
+    tags = pn.read_csv(tag_file_path)
+    tags = list(np.array(tags['Tags'])) 
+    matrix = Counter()
+    for counter,doc in enumerate(docs):    
+        tag_list = tags[counter]
+        for token in doc:
+                for tag in tag_list.split():
+                    key = token+' '+tag
+                    matrix[key] += 1
+    queue.put(matrix)
+ 
+
+
     
 """
     PARALLELIZATION VIA MAPPING 
@@ -522,115 +536,15 @@ def filter_vocab(vocab = None, ratio = 1, return_counts = True, min_df = 1):
         return vocab[int(offset):int(size+offset)]
 
 
-
-################################################
-###### CREATE BOW FEATURES 
-################################################
-
-
-def create_word_tag_matrix(tag_list_path, doc_chunks_path, output_path_data, processes_num = 20, merge_processes_num = 10):
-    
-#    tag_list        = cPickle.load(open(tag_list_path,'r'))        
-    process_list    = [None]*processes_num
-    counter_queue   = Queue() 
-    merge_counter_queue = Queue()
-#    word_tag_dict   = Counter()
-    path_list       = get_chunk_paths(doc_chunks_path)    
-    tag_path_list   = get_chunk_paths(tag_list_path)   
-    num_files       = len(path_list)    
-    
-    
-    if len(tag_path_list) !=  len(path_list):
-        raise Exception('Given argument problem !!!')
-        
-#    for counter in range(doc_list.shape[0]):
-#        print 'Document ' + str(counter+1) + ' of ' +str(doc_list.shape[0])
-#        doc = list(extractor.inverse_transform(doc_list[counter]))[0]
-#        tags = tag_list[counter]
-#        for token in doc:
-#            for tag in tags:
-#                key = token+' '+tag
-#                word_tag_dict[key] += 1
-    file_counter = 0
-    while_flag = True
-    merging_processes = [Process(target=counter_merger, args=(counter_queue,merge_counter_queue,output_path_data, i, merge_processes_num)) for i in range(merge_processes_num)]
-    
-    # start counter merging processes    
-    for process in merging_processes:    
-        process.start()
-        
-    while while_flag:  
-        process_list = []
-        for process_no in range(processes_num):
-            if file_counter == num_files:
-                while_flag = False
-                break 
-            next_file_path = path_list[file_counter]
-            next_tag_file_path = tag_path_list[file_counter]
-            process_list.append(Process(target=count_word_tag_matrix, args=(next_tag_file_path, next_file_path, counter_queue, process_no)))
-            file_counter = file_counter + 1
-        
-        print('File counter: ' +str(file_counter) )
-        
-        for process in process_list:
-            process.start()
-            
-        for process in process_list:
-            process.join()
-        
-        if while_flag == False:
-            for process in merging_processes:
-                counter_queue.put(-1) # stop signal
-            for process in merging_processes:
-                process.join()
-
-    
-def counter_merger(counter_queue, merge_counter_queue, output_path_data, process_no, merge_processes):
-    master_counter = Counter()
-    while True:
-        item = counter_queue.get()
-#        print('Merging')
-        if item == -1:
-           cPickle.dump(master_counter, open(str(process_no) + output_path_data,'w'))
-           merge_counter_queue.put(master_counter)
-#           master_counter_queue.put(master_counter) 
-           if process_no == 0:
-               master_counter = Counter()
-               print('Final MERGING!!!')
-               for i in range(merge_processes):
-                   master_counter = master_counter + merge_counter_queue.get()
-                   cPickle.dump(master_counter,open('all_merged'+ output_path_data,'w'))
-           return
-        master_counter = master_counter + item
-        print('Process '+str(process_no)+' Number of items in matrix ' + str(len(master_counter.keys())))
-        
-        
-def count_word_tag_matrix(tag_file_path,doc_file_path,queue, process_no):
-#    print str(process_no)+' started ---!!!'
-    docs = cPickle.load(open(doc_file_path,'r'))
-    tags = pn.read_csv(tag_file_path)
-    tags = list(np.array(tags['Tags'])) 
-    matrix = Counter()
-    for counter,doc in enumerate(docs):    
-        tag_list = tags[counter]
-        for token in doc:
-                for tag in tag_list.split():
-                    key = token+' '+tag
-                    matrix[key] += 1
-    queue.put(matrix)
-#    print str(process_no)+' finished!!!'
-#    print('Number of items in matrix ' + str(len(l[1].keys())))
-        
-
-    
 if __name__ == '__main__':
 
 #    divide_data_into_chunks('DATA/Train_no_code.csv','DATA/train_chunks',10000)
 #    master_preprocessing_call(dummy_all_preprocessing,'DATA/train_chunks_csv',60,'DATA/tokenized_title_chunks_dumps', 'Title')
-#    create_word_tag_matrix('DATA/train_chunks_csv', 'DATA/tokenized_title_chunks_dumps', 'title_word_tag_matrix.data', processes_num = 100, merge_processes_num = 40)    
+#    create_word_tag_matrix('DATA/train_chunks_csv', 'DATA/tokenized_title_chunks_dumps', 'title_word_tag_matrix.data', processes_num = 100, no_merge_procs = 40)    
     
 #    
-     master_vocab_generation(dummy_token_count,path_chunks='DATA/tokenized_body_chunks_dumps' ,output_path_data='word_counts.data' , processes=60, merge_processes=30)
+     master_parallel_run(token_count, merge_counters, path_chunks='DATA/tokenized_body_chunks_dumps' 
+        ,output_path_data='word_counts.data' , no_procs=20, no_merge_procs=50)
     
 #    token_counts = count_tokens_from_chunk('DATA/tokenized_chunks_dumps')    
 #    cPickle.dump(Vocabulary, open('Vocab_Body.data','w'))
